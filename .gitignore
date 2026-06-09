@@ -1,0 +1,22 @@
+# Private to local dev; never push
+CLAUDE.md
+.claude/
+SPEAKER_NOTES.md
+manuscript_*.txt
+manuscript_*.md
+manuscript_*.docx
+*Guidelines*.pdf
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Override global ~/.gitignore_global rule that hides src/ in data projects
+!src/
+!src/**
+
+# Node / build artifacts (if a web-presentation toolchain lands later)
+node_modules/
+dist/
+.cache/

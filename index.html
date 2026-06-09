@@ -1,0 +1,1143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nextflow Workflow Management — a guest lecture (hlatyping worked example)</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/black.css" id="theme">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/monokai.css">
+
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css">
+
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="reveal">
+  <div class="slides">
+
+    <!-- 1. Title -->
+    <section class="title-slide" data-section="Opening">
+      <h1>Nextflow workflow management</h1>
+      <p class="subtitle">A practical tour of dataflow pipelines, anchored in a real nf-core production workflow: <strong>hlatyping</strong>.</p>
+      <p class="lecturer">
+        <strong>MD Shakhaowat Hossain</strong><br>
+        <span>PhD Candidate, Biomedical Sciences</span><br>
+        <span>Tulane University School of Medicine</span><br>
+        <span>HLA immunogenetics · transplant informatics</span>
+      </p>
+      <p class="kb-hint">Press <kbd>S</kbd> for speaker view · <kbd>Space</kbd> to advance · <kbd>Esc</kbd> for overview</p>
+      <aside class="notes">
+        Time: ~1 min. Frame the talk: we are not going to read documentation. We will read a real, production HLA-typing pipeline that I run, and use it to teach Nextflow. By the end of the hour you should be able to open workflows/hlatyping.nf and understand every line.
+      </aside>
+    </section>
+
+    <!-- 2. Agenda -->
+    <section data-section="Opening">
+      <h2>Where we are going</h2>
+      <div class="two-col">
+        <div class="col">
+          <ol>
+            <li>Why workflow managers exist <small>(5 min)</small></li>
+            <li>The Nextflow core model <small>(8 min)</small></li>
+            <li>DSL2 + channels <small>(10 min)</small></li>
+            <li>hlatyping walkthrough <small>(8 min)</small></li>
+            <li>Executors, containers, configuration <small>(6 min)</small></li>
+            <li>nf-core, resume, observability <small>(4 min)</small></li>
+            <li>Q&amp;A <small>(4 min)</small></li>
+          </ol>
+        </div>
+        <div class="col">
+          <div class="callout">
+            <strong>The running example.</strong> <code>nf-core/hlatyping</code> performs 4-digit HLA class I typing from NGS reads using OptiType, with an optional HLA-HD path for class I + II. We will return to it on almost every slide.
+          </div>
+          <p style="margin-top:1em; font-size:0.7em; color:var(--muted)">
+            Concrete > abstract. Every concept lands on a file you can grep.
+          </p>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~1 min. Tell them the talk is structured around one real pipeline, not a toy `hello world`. Mention that the slides are open source and they can revisit.
+      </aside>
+    </section>
+
+    <!-- 3. The reproducibility crisis -->
+    <section data-section="Why workflow managers">
+      <h2>The reproducibility tax on biological pipelines</h2>
+      <ul>
+        <li>A typical NGS pipeline is six to twelve tools, each with its own dependency graph, each with its own subtle defaults.</li>
+        <li>Two analysts on the same dataset routinely disagree at the third decimal place, sometimes at the variant call.</li>
+        <li>Reviewers ask: <em>can you re-run this in six months with the same answer?</em> Often the honest answer is no.</li>
+      </ul>
+      <div class="callout warn" style="margin-top:0.6em">
+        <strong>HLA-specific stake.</strong> A 4-digit class I typing call decides donor eligibility. A pipeline whose result drifts when an Ubuntu apt-mirror updates samtools is not a clinical-grade tool.
+      </div>
+      <aside class="notes">
+        Time: ~2 min. Open with a question to the room: how many of you have had a bash pipeline give a different answer when you re-ran it on a new node? Almost every hand goes up. That is the problem we are about to solve.
+      </aside>
+    </section>
+
+    <!-- 4. Bash pipelines hit a ceiling -->
+    <section data-section="Why workflow managers">
+      <h2>Bash pipelines hit a hard ceiling</h2>
+      <div class="two-col">
+        <div class="col">
+          <h3>What bash gives you</h3>
+          <ul>
+            <li>Pipes between two programs</li>
+            <li>A linear sequence of commands</li>
+            <li>Manual control of files and intermediates</li>
+          </ul>
+          <h3>What bash does not give you</h3>
+          <ul>
+            <li>Parallelism over samples</li>
+            <li>Restart from the failed step</li>
+            <li>Portability across local / HPC / cloud</li>
+            <li>Version-pinned environments</li>
+            <li>Provenance you can show a reviewer</li>
+          </ul>
+        </div>
+        <div class="col">
+<pre><code class="language-bash" data-noescape># A typical sequencing pipeline, written as bash.
+# Looks fine until sample 47 fails on a transient I/O blip.
+for s in $(cat samples.txt); do
+  fastqc reads/${s}_1.fq.gz reads/${s}_2.fq.gz -o qc/
+  bwa mem -t 8 ref.fa reads/${s}_1.fq.gz reads/${s}_2.fq.gz \
+    | samtools sort -@ 8 -o bam/${s}.bam -
+  samtools index bam/${s}.bam
+done
+# Now: which sample is on which step? Which finished? Restart how?</code></pre>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~1.5 min. Note that bash is not bad. It is great for prototyping. But when you have 200 samples and one cluster outage, the cost of recovering is the cost of writing the pipeline again.
+      </aside>
+    </section>
+
+    <!-- 5. Workflow manager landscape -->
+    <section data-section="Why workflow managers">
+      <h2>The workflow manager landscape</h2>
+      <table class="compare">
+        <thead>
+          <tr><th>Tool</th><th>Paradigm</th><th>Lang</th><th>Containers</th><th>Cloud-native</th><th>Resume</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Make</td><td>File-target DAG</td><td>Make</td><td class="bad">Manual</td><td class="bad">No</td><td class="mid">By timestamp</td></tr>
+          <tr><td>Snakemake</td><td>File-target DAG</td><td>Python</td><td class="good">Yes</td><td class="mid">Add-ons</td><td class="good">Yes</td></tr>
+          <tr><td>WDL / Cromwell</td><td>Task graph</td><td>WDL</td><td class="good">Yes</td><td class="good">Yes</td><td class="good">Yes</td></tr>
+          <tr><td>CWL</td><td>Task graph (YAML)</td><td>CWL</td><td class="good">Yes</td><td class="mid">Engine-dep.</td><td class="mid">Engine-dep.</td></tr>
+          <tr><td><strong>Nextflow</strong></td><td><strong>Dataflow + channels</strong></td><td>Groovy DSL2</td><td class="good">First-class</td><td class="good">First-class</td><td class="good"><code>-resume</code></td></tr>
+        </tbody>
+      </table>
+      <p style="font-size:0.65em; color:var(--muted); margin-top:0.7em">
+        Snakemake and Nextflow dominate bioinformatics. The Broad uses WDL via Cromwell at planet-scale. We are teaching Nextflow today because <strong>nf-core</strong>, the community standard for curated pipelines, is built on it.
+      </p>
+      <aside class="notes">
+        Time: ~1.5 min. Do not bash other tools. They are good tools. Nextflow's wins are: dataflow model fits multi-sample bioinformatics naturally, containerization is first-class, and the nf-core community gives you ~100 pre-built pipelines.
+      </aside>
+    </section>
+
+    <!-- 6. SECTION: Nextflow core model -->
+    <section class="section-divider" data-section="The Nextflow core model">
+      <div class="section-num">Part 2 · 8 minutes</div>
+      <h1>The Nextflow core model</h1>
+      <p class="section-blurb">Dataflow programming, channels, processes, and the DAG that builds itself.</p>
+      <aside class="notes">
+        Time: ~10 sec. Section divider. Just announce we are moving into mechanics.
+      </aside>
+    </section>
+
+    <!-- 7. Dataflow programming -->
+    <section data-section="The Nextflow core model">
+      <h2>Dataflow programming, in one slide</h2>
+      <div class="two-col">
+        <div class="col">
+          <p style="font-size:0.75em">
+            You do not write the order things run in. You write <strong>what depends on what</strong>. Nextflow infers the DAG from that.
+          </p>
+          <ul style="font-size:0.7em">
+            <li><strong>Process</strong> = a unit of work (a script + its inputs and outputs).</li>
+            <li><strong>Channel</strong> = a typed, asynchronous queue of values.</li>
+            <li><strong>Workflow</strong> = wiring channels between processes.</li>
+          </ul>
+          <div class="callout" style="margin-top:0.5em">
+            The DAG is <em>implicit</em>. If process B reads from process A's output channel, B waits for A. You never write a scheduler.
+          </div>
+        </div>
+        <div class="col">
+<pre><code class="language-groovy">workflow {
+    reads_ch = Channel.fromFilePairs('data/*_{1,2}.fq.gz')
+
+    FASTQC(reads_ch)        // runs on every pair, in parallel
+    BWA_MEM(reads_ch)       // also runs in parallel
+    MULTIQC(FASTQC.out.zip.collect())   // waits for ALL FASTQCs
+}</code></pre>
+          <p style="font-size:0.6em; color:var(--muted); margin-top:0.5em">
+            Sample-level parallelism is free. <code>collect()</code> is the only synchronization barrier in the example above.
+          </p>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~2 min. Hammer the point: parallelism over samples is free. You never write a for-loop. The runtime fans out automatically.
+      </aside>
+    </section>
+
+    <!-- 8. Imperative vs dataflow morph -->
+    <section data-section="The Nextflow core model" data-state="show-morph">
+      <h2>Bash to DSL2, side by side</h2>
+      <p style="font-size:0.65em; color:var(--muted)">Click <strong>Morph</strong> to transform the bash pipeline on the left into the Nextflow equivalent on the right.</p>
+      <div class="btn-row">
+        <button class="btn" id="morph-reset">Bash</button>
+        <button class="btn active" id="morph-go">DSL2</button>
+      </div>
+      <div class="morph-widget">
+        <div>
+          <h3>Bash</h3>
+<pre id="morph-left"><code class="language-bash">for s in $(cat samples.txt); do
+  bwa mem ref.fa \
+    reads/${s}_1.fq.gz reads/${s}_2.fq.gz \
+    | samtools sort -o ${s}.bam -
+  samtools index ${s}.bam
+done</code></pre>
+        </div>
+        <div>
+          <h3>Nextflow DSL2</h3>
+<pre id="morph-right"><code class="language-groovy">process BWA_MEM {
+    tag "$meta.id"
+    input:  tuple val(meta), path(reads)
+    output: tuple val(meta), path("*.bam"), path("*.bai")
+
+    script:
+    """
+    bwa mem ref.fa ${reads[0]} ${reads[1]} \
+      | samtools sort -o ${meta.id}.bam -
+    samtools index ${meta.id}.bam
+    """
+}
+
+workflow {
+    Channel.fromFilePairs('reads/*_{1,2}.fq.gz')
+        | map { id, files -> [[id: id], files] }
+        | BWA_MEM
+}</code></pre>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~1.5 min. Walk through the morph slowly. Point out: the for-loop disappeared, the I/O contract is explicit, and the `meta` map is a Nextflow idiom we will see throughout hlatyping.
+      </aside>
+    </section>
+
+    <!-- 9. SECTION: DSL2 -->
+    <section class="section-divider" data-section="DSL2 syntax">
+      <div class="section-num">Part 3 · 10 minutes</div>
+      <h1>DSL2: the syntax that holds it all together</h1>
+      <p class="section-blurb">Processes, workflows, take/emit, modules, sub-workflows.</p>
+      <aside class="notes">Time: ~10 sec.</aside>
+    </section>
+
+    <!-- 10. Process anatomy -->
+    <section data-section="DSL2 syntax">
+      <h2>Anatomy of a <code>process</code></h2>
+      <div class="two-col">
+        <div class="col">
+<pre><code class="language-groovy">process OPTITYPE {
+    tag        "$meta.id"
+    label      "process_medium"
+    container  'quay.io/biocontainers/optitype:1.3.5--hdfd78af_3'
+    publishDir "${params.outdir}/optitype", mode: 'copy'
+
+    input:
+    tuple val(meta), path(bam), path(bai)
+
+    output:
+    tuple val(meta), path("*_result.tsv"),        emit: hla_type
+    tuple val(meta), path("*_coverage_plot.pdf"), emit: coverage_plot
+    path "versions.yml",                          emit: versions
+
+    script:
+    """
+    OptiTypePipeline.py -i ${bam} \\
+        --${meta.seq_type} -v -o ./ -p ${meta.id}
+    """
+}</code></pre>
+        </div>
+        <div class="col" style="font-size:0.75em">
+          <p><strong>Directives</strong> (top): runtime metadata.</p>
+          <ul>
+            <li><code>tag</code>: human label per task</li>
+            <li><code>label</code>: resource bucket in <code>conf/base.config</code></li>
+            <li><code>container</code>: pinned image, local and cloud</li>
+            <li><code>publishDir</code>: where outputs land in <code>results/</code></li>
+          </ul>
+          <p><strong>I/O contract</strong>: tuples, paths, <code>val</code>, named <code>emit:</code>s.</p>
+          <p><strong>Script</strong>: bash by default; can be Python, R, or anything with a shebang.</p>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~2 min. Most important slide in the DSL2 section. The process is the unit of composition. Mention that real nf-core modules also emit a versions.yml via a heredoc that feeds the Channel.topic("versions") collation system shown later.
+      </aside>
+    </section>
+
+    <!-- 11. workflow + take/emit -->
+    <section data-section="DSL2 syntax">
+      <h2><code>workflow { take / emit }</code>: composable sub-workflows</h2>
+      <div class="two-col">
+        <div class="col">
+<pre><code class="language-groovy">workflow NFCORE_HLATYPING {
+
+    take:
+    samplesheet  // channel: samplesheet read in from --input
+
+    main:
+    HLATYPING ( samplesheet )
+
+    emit:
+    multiqc_report = HLATYPING.out.multiqc_report
+}</code></pre>
+          <p style="font-size:0.65em; color:var(--muted); margin-top:0.5em">
+            From <code>main.nf</code> in nf-core/hlatyping. <code>take</code> declares inputs; <code>emit</code> declares outputs. The body in <code>main:</code> is just like any workflow.
+          </p>
+        </div>
+        <div class="col" style="font-size:0.7em">
+          <ul>
+            <li><code>take:</code> turns a workflow into a reusable function with named inputs.</li>
+            <li><code>emit:</code> exposes named outputs that callers reference as <code>WORKFLOW.out.name</code>.</li>
+            <li>Without these, a workflow is the top-level entrypoint (the unnamed <code>workflow {...}</code>).</li>
+          </ul>
+          <div class="callout nfcore" style="margin-top:0.6em">
+            <strong>nf-core idiom.</strong> Every nf-core pipeline has at least three workflows: the top-level entrypoint, a <code>PIPELINE_INITIALISATION</code> sub-workflow that handles param parsing, and the named scientific workflow (<code>HLATYPING</code>).
+          </div>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~1.5 min. Show how this is just function-with-named-parameters but for graphs of processes. This is what lets nf-core ship "modules" you can import.
+      </aside>
+    </section>
+
+    <!-- 12. Modules and sub-workflows -->
+    <section data-section="DSL2 syntax">
+      <h2>Modules and sub-workflows: <code>include</code></h2>
+<pre><code class="language-groovy">// workflows/hlatyping.nf (real, abridged)
+
+include { CHECK_PAIRED          } from '../modules/local/check_paired'
+include { HLAHD_INSTALL         } from '../modules/local/hlahd/install'
+include { HLAHD                 } from '../modules/local/hlahd/genotype'
+
+include { CAT_FASTQ             } from '../modules/nf-core/cat/fastq'
+include { FASTQC                } from '../modules/nf-core/fastqc/main'
+include { MULTIQC               } from '../modules/nf-core/multiqc/main'
+include { GUNZIP                } from '../modules/nf-core/gunzip/main'
+include { OPTITYPE              } from '../modules/nf-core/optitype/main'
+include { SAMTOOLS_COLLATEFASTQ } from '../modules/nf-core/samtools/collatefastq/main'
+include { SAMTOOLS_VIEW         } from '../modules/nf-core/samtools/view/main'
+include { YARA_INDEX            } from '../modules/nf-core/yara/index/main'
+include { YARA_MAPPER           } from '../modules/nf-core/yara/mapper/main'</code></pre>
+      <ul style="font-size:0.7em; margin-top:0.5em">
+        <li><code>modules/nf-core/</code> = community-curated, version-pinned, identical across pipelines.</li>
+        <li><code>modules/local/</code> = pipeline-specific (HLA-HD installer is license-gated, paired-end check for BAM input).</li>
+        <li>Includes are statically resolved. The DAG is known before any task runs.</li>
+      </ul>
+      <aside class="notes">
+        Time: ~1.5 min. The split between local and nf-core modules is a design philosophy: if it can be shared, it lives in nf-core/modules and gets shared. Local is for the irreducibly pipeline-specific.
+      </aside>
+    </section>
+
+    <!-- 13. hlatyping main.nf entrypoint -->
+    <section data-section="DSL2 syntax">
+      <h2>The hlatyping <code>main.nf</code> entrypoint, in full</h2>
+<pre><code class="language-groovy">workflow {
+    main:
+    PIPELINE_INITIALISATION (
+        params.version,        params.validate_params,
+        params.monochrome_logs, args,
+        params.outdir,         params.input,
+        params.help,           params.help_full,
+        params.show_hidden
+    )
+
+    NFCORE_HLATYPING ( PIPELINE_INITIALISATION.out.samplesheet )
+
+    PIPELINE_COMPLETION (
+        params.email,          params.email_on_fail,
+        params.plaintext_email, params.outdir,
+        params.monochrome_logs, params.hook_url,
+        NFCORE_HLATYPING.out.multiqc_report
+    )
+}</code></pre>
+      <p style="font-size:0.65em; color:var(--muted); margin-top:0.5em">
+        Three sub-workflows, wired by named outputs. <strong>This is the entire entrypoint of a production pipeline.</strong> Everything else is composition.
+      </p>
+      <aside class="notes">
+        Time: ~1.5 min. Show that you can read the entire entrypoint of a real production pipeline in fifteen lines. That readability is a feature of dataflow design, not an accident.
+      </aside>
+    </section>
+
+    <!-- 14. SECTION: Channels deep dive -->
+    <section class="section-divider" data-section="Channels deep dive">
+      <div class="section-num">Part 4 · 10 minutes</div>
+      <h1>Channels are the program</h1>
+      <p class="section-blurb">Queue vs value, operators, and the patterns hlatyping actually uses.</p>
+      <aside class="notes">Time: ~10 sec.</aside>
+    </section>
+
+    <!-- 15. Queue vs value -->
+    <section data-section="Channels deep dive">
+      <h2>Queue channels vs value channels</h2>
+      <div class="two-col">
+        <div class="col">
+          <h3>Queue channel</h3>
+          <ul style="font-size:0.7em">
+            <li>Asynchronous stream of N items.</li>
+            <li>Consumed once; emits to downstream processes as items arrive.</li>
+            <li>Natural fit for "one item per sample".</li>
+          </ul>
+<pre><code class="language-groovy">Channel.fromFilePairs('reads/*_{1,2}.fq.gz')
+// emits one tuple per sample pair</code></pre>
+        </div>
+        <div class="col">
+          <h3>Value channel</h3>
+          <ul style="font-size:0.7em">
+            <li>Holds a single value that can be read by any downstream process arbitrarily many times.</li>
+            <li>Natural fit for shared resources (reference genome, index, panel).</li>
+          </ul>
+<pre><code class="language-groovy">ch_ref = Channel.value(
+    file("$projectDir/data/references/grch38.fa")
+)
+// every YARA_MAPPER task sees the same reference</code></pre>
+        </div>
+      </div>
+      <div class="callout warn" style="margin-top:0.5em; font-size:0.65em">
+        <strong>The most common Nextflow bug.</strong> Two queue channels of unequal length combined naively produce zero outputs. Either pair them with <code>.combine()</code> / <code>.cross()</code> or convert one to a value channel.
+      </div>
+      <aside class="notes">
+        Time: ~1.5 min. Most early Nextflow confusion comes from mixing queue and value channels. Spend a moment on the warning callout, with the personal anecdote from your own work if you have one.
+      </aside>
+    </section>
+
+    <!-- 15b. Channel Cardinality & The Collect Barrier -->
+    <section data-section="Channels deep dive">
+      <h2>Channel Cardinality &amp; The <code>collect()</code> Barrier</h2>
+      <div class="two-col">
+        <div class="col">
+          <h3>Mismatched Cardinalities</h3>
+          <ul style="font-size:0.7em">
+            <li>When joining or combining two queue channels, Nextflow pairs them sequentially.</li>
+            <li>If <code>ch_reads</code> has 5 items and <code>ch_index</code> has 1 item, a process reading both runs <strong>only once</strong>.</li>
+            <li>A value channel (or a singleton channel combined) will implicitly broadcast to all.</li>
+          </ul>
+          <div class="callout warn" style="margin-top:0.4em; font-size:0.65em">
+            <strong>Rule of thumb.</strong> Keep your sample metadata map (<code>meta</code>) attached to trace elements and ensure sizes align.
+          </div>
+        </div>
+        <div class="col">
+          <h3>The Synchronization Barrier</h3>
+          <ul style="font-size:0.7em">
+            <li>The <code>.collect()</code> operator gathers all elements from a queue channel and emits them as a single list (value channel).</li>
+            <li>This forces a synchronization barrier: downstream processes wait for <strong>all</strong> upstream runs to finish.</li>
+          </ul>
+<pre><code class="language-groovy">// MultiQC runs once, waiting for all FastQC zips
+MULTIQC ( FASTQC.out.zip.collect() )</code></pre>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~2 min. Focus on cardinality mismatches. Explain that queue channels are consumed in lockstep, and the collect() barrier is how you force aggregate processes like MultiQC to wait.
+      </aside>
+    </section>
+
+    <!-- 16. Operator catalog -->
+    <section data-section="Channels deep dive">
+      <h2>Operators: a working catalog</h2>
+      <table class="compare">
+        <thead><tr><th>Operator</th><th>What it does</th><th>Used in hlatyping for</th></tr></thead>
+        <tbody>
+          <tr><td><code>map</code></td><td>Transform each item</td><td>Attach the right HLA reference per <code>seq_type</code></td></tr>
+          <tr><td><code>branch</code></td><td>Route items into named outputs</td><td>Split samplesheet into bam / fastq_multiple / fastq_single</td></tr>
+          <tr><td><code>cross</code></td><td>Pair items by their first element</td><td>Pair each sample's reads with its Yara index</td></tr>
+          <tr><td><code>multiMap</code></td><td>Emit into multiple named outputs from one input</td><td>Split a cross result into <code>reads</code> and <code>index</code> streams</td></tr>
+          <tr><td><code>combine</code></td><td>Cartesian product</td><td>Broadcast HLA-HD install artifact to every FASTQ</td></tr>
+          <tr><td><code>groupTuple</code></td><td>Group by key</td><td>Group versions by process name before MultiQC</td></tr>
+          <tr><td><code>collect</code></td><td>Gather all items into a single list</td><td>Wait for all FastQC zips before MultiQC</td></tr>
+          <tr><td><code>mix</code></td><td>Merge streams of the same shape</td><td>Concatenate version-yaml outputs from every process</td></tr>
+          <tr><td><code>join</code></td><td>Inner join on first element</td><td>Pair Yara BAM with its BAI before OptiType</td></tr>
+        </tbody>
+      </table>
+      <aside class="notes">
+        Time: ~1.5 min. Do not try to teach every operator. Tell them: this is your future cheat sheet, screenshot it. Then we will see four of them used in real code.
+      </aside>
+    </section>
+
+    <!-- 17. Operator playground -->
+    <section data-section="Channels deep dive">
+      <h2>Channel operator playground</h2>
+      <p style="font-size:0.65em; color:var(--muted)">Click an operator to see a marble diagram drawn from hlatyping's actual usage.</p>
+      <div class="op-widget">
+        <div class="op-list">
+          <button class="btn op-btn active" data-op="branch">branch</button>
+          <button class="btn op-btn" data-op="cross">cross</button>
+          <button class="btn op-btn" data-op="multiMap">multiMap</button>
+          <button class="btn op-btn" data-op="groupTuple">groupTuple</button>
+          <button class="btn op-btn" data-op="combine">combine</button>
+          <button class="btn op-btn" data-op="mix">mix</button>
+        </div>
+        <div class="marble" id="marble-mount">
+          <!-- Filled by app.js -->
+        </div>
+      </div>
+      <div class="op-controls">
+        <button class="btn" id="marble-restart">↻ Replay animation</button>
+        <span class="hint">Marbles animate on each operator switch; replay to re-run.</span>
+      </div>
+      <aside class="notes">
+        Time: ~2 min. Demo at least branch, cross+multiMap, and groupTuple. Each click maps to a usage you will see in the hlatyping source in the next few slides — make that connection out loud.
+      </aside>
+    </section>
+
+    <!-- 18. Real branch from hlatyping -->
+    <section data-section="Channels deep dive">
+      <h2><code>branch</code> in production: input-type routing</h2>
+<pre><code class="language-groovy">// workflows/hlatyping.nf — verbatim
+ch_samplesheet
+    .branch { meta, files -&gt;
+        bam : files[0].getExtension() == "bam"
+        fastq_multiple :
+            (meta.single_end && files.size() &gt; 1) ||
+            (!meta.single_end && files.size() &gt; 2)
+        fastq_single : true
+    }
+    .set { ch_input_files }
+
+// Downstream: ch_input_files.bam, ch_input_files.fastq_multiple, ch_input_files.fastq_single</code></pre>
+      <ul style="font-size:0.7em">
+        <li>One channel in, three named channels out, by case.</li>
+        <li>The <code>true</code> on the last branch makes it the catch-all default.</li>
+        <li>Each branch can feed a different sub-DAG (BAM-to-FASTQ conversion vs cat vs straight FastQC).</li>
+      </ul>
+      <aside class="notes">
+        Time: ~1.5 min. This is the slide that unifies the abstract operator catalog with real code. Walk slowly through the branch labels, then point to the conversion paths that consume each one.
+      </aside>
+    </section>
+
+    <!-- 19. Real cross + multiMap -->
+    <section data-section="Channels deep dive">
+      <h2><code>cross</code> + <code>multiMap</code>: pairing reads with their index</h2>
+      <div class="two-col">
+        <div class="col">
+<pre><code class="language-groovy">// workflows/hlatyping.nf — verbatim
+ch_all_fastq                      // [ meta, [ reads ] ]
+    .cross(YARA_INDEX.out.index)  // [ [meta, [reads]], [meta, index] ]
+    .multiMap { reads, index ->   // splits joined cross tuple
+        reads: reads              // emitted as: [ meta, [ reads ] ]
+        index: index              // emitted as: [ meta, index ]
+    }
+    .set { ch_mapping_input }
+
+YARA_MAPPER(
+    ch_mapping_input.reads,
+    ch_mapping_input.index
+)</code></pre>
+        </div>
+        <div class="col" style="font-size:0.7em">
+          <h3>Data Shapes Step-by-Step</h3>
+          <ol>
+            <li><strong><code>ch_all_fastq</code></strong>: Emits <code>[meta, [fastq_1, fastq_2]]</code> per sample.</li>
+            <li><strong><code>YARA_INDEX.out.index</code></strong>: Emits <code>[meta, index_dir]</code>.</li>
+            <li><strong><code>cross()</code></strong>: Aligns the elements by their first item (the <code>meta</code> map key). It outputs a nested tuple: <code>[ [meta, [reads]], [meta, index] ]</code>.</li>
+            <li><strong><code>multiMap()</code></strong>: Deconstructs the pair and routes them into separate channels, ensuring the reads and index streams flow to <code>YARA_MAPPER</code> in exact lockstep.</li>
+          </ol>
+          <div class="callout warn" style="margin-top:0.5em; font-size:0.9em">
+            <strong>Sample Safety.</strong> Without this coordination, Yara could align Patient A's reads to Patient B's custom reference.
+          </div>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~2 min. Walk through the code on the left and the shape transformations on the right. Point out that cross pairs by keys matching in the meta map, which ensures strict sample safety.
+      </aside>
+    </section>
+
+    <!-- 20. SECTION: hlatyping worked example -->
+    <section class="section-divider" data-section="hlatyping worked example">
+      <div class="section-num">Part 5 · 8 minutes</div>
+      <h1>The hlatyping pipeline, end to end</h1>
+      <p class="section-blurb">A 4-digit class I caller you can put into a transplant-matching audit.</p>
+      <aside class="notes">Time: ~10 sec.</aside>
+    </section>
+
+    <!-- 21. HLA primer + samplesheet -->
+    <section data-section="hlatyping worked example">
+      <h2>What we are typing, and from what</h2>
+      <div class="two-col">
+        <div class="col" style="font-size:0.72em">
+          <h3>HLA in 30 seconds</h3>
+          <ul>
+            <li>HLA = MHC in humans. Class I (HLA-A, -B, -C) presents intracellular peptides.</li>
+            <li>Hyperpolymorphic: thousands of alleles per locus.</li>
+            <li>Standard reporting is 4-digit (e.g. <code>A*02:01</code>), protein-level resolution.</li>
+            <li>Used in transplant matching, neoantigen prediction, GWAS, pharmacogenomics.</li>
+          </ul>
+        </div>
+        <div class="col">
+          <h3>Samplesheet (the only input contract)</h3>
+<pre><code class="language-csv">sample,fastq_1,fastq_2,seq_type
+CONTROL_REP1,reads/c1_R1.fq.gz,reads/c1_R2.fq.gz,dna
+PATIENT_07,reads/p7_R1.fq.gz,reads/p7_R2.fq.gz,rna
+DONOR_A,reads/dA.bam,,dna</code></pre>
+          <p style="font-size:0.65em; color:var(--muted); margin-top:0.5em">
+            Column rules: paired-end gets both <code>fastq_1</code> and <code>fastq_2</code>; BAM input puts the path in <code>fastq_1</code> with a <code>bam</code> column. <code>seq_type</code> drives reference selection.
+          </p>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~1.5 min. Briefly orient non-immunology attendees on HLA without going too deep. The samplesheet is the single most important pipeline contract — once it's right, the rest is automated.
+      </aside>
+    </section>
+
+    <!-- 22. Pipeline summary -->
+    <section data-section="hlatyping worked example">
+      <h2>The pipeline, in six steps</h2>
+      <ol style="font-size:0.78em">
+        <li><strong>Merge</strong> FASTQs from the same sample (multi-lane), via <code>cat</code>.</li>
+        <li><strong>QC</strong> raw reads with FastQC.</li>
+        <li><strong>Index</strong> the curated HLA reference (DNA or RNA, per sample) with Yara.</li>
+        <li><strong>Pre-map</strong> reads to the HLA reference with Yara, producing a small BAM. <em>Avoids OptiType's slower internal RazerS mapping.</em></li>
+        <li><strong>Type</strong> with OptiType: integer linear programming over the mapped reads, considering all class-I loci simultaneously.</li>
+        <li><strong>Aggregate</strong> with MultiQC: one HTML for QC + per-sample typing summary.</li>
+      </ol>
+      <div class="callout nfcore" style="margin-top:0.5em; font-size:0.65em">
+        <strong>Optional HLA-HD branch.</strong> Set <code>--tools optitype,hlahd</code> with a valid <code>--hlahd_path</code> and the pipeline additionally produces class I + II calls at up to 6-digit (3-field) resolution.
+      </div>
+      <aside class="notes">
+        Time: ~1.5 min. Step 4 is the most-asked question: why pre-map if OptiType can map itself? Answer: speed and reproducibility — Yara is faster, and we control the mapping behavior explicitly.
+      </aside>
+    </section>
+
+    <!-- 23. Animated 8-stop DAG -->
+    <section data-section="hlatyping worked example">
+      <h2>The hlatyping DAG, one step at a time</h2>
+      <p style="font-size:0.6em; color:var(--muted); margin-bottom:0.4em">Press <strong>Next</strong> to walk the DAG. The right column shows the channel contents at that stage.</p>
+      <div class="btn-row">
+        <button class="btn" id="dag-prev">‹ Prev</button>
+        <button class="btn" id="dag-next">Next ›</button>
+        <button class="btn" id="dag-reset">Reset</button>
+        <span style="font-size:0.55em; color:var(--muted); align-self:center">Stage <span id="dag-step">1</span> / 8</span>
+      </div>
+      <div class="dag-widget">
+        <div class="dag-stage">
+          <svg class="dag-svg" id="dag-svg" viewBox="0 0 760 360" aria-label="hlatyping pipeline DAG, animated"></svg>
+        </div>
+        <div class="dag-side" id="dag-side">
+          <!-- Filled by app.js -->
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~3 min. This is the centerpiece interactive widget. Spend real time here. For each stop, point at the SVG node, read the channel contents on the right out loud, then advance. Highlight stop (f) — the pre-mapping — and why it exists.
+      </aside>
+    </section>
+
+    <!-- 24. Reading hlatyping.nf — Yara block -->
+    <section data-section="hlatyping worked example">
+      <h2>Reading the source: reference selection + Yara</h2>
+<pre><code class="language-groovy">// workflows/hlatyping.nf — verbatim, abridged
+if ( "optitype" in tools.tokenize(",") ) {
+    ch_all_fastq
+        .map { meta, reads -&gt;
+            [ meta, file("$projectDir/data/references/hla_reference_${meta['seq_type']}.fasta") ]
+        }
+        .set { ch_input_with_references }
+    YARA_INDEX ( ch_input_with_references )
+    ch_all_fastq
+        .cross(YARA_INDEX.out.index)
+        .multiMap { reads, index -&gt;
+            reads: reads
+            index: index
+        }
+        .set { ch_mapping_input }
+    YARA_MAPPER ( ch_mapping_input.reads, ch_mapping_input.index )
+    OPTITYPE ( YARA_MAPPER.out.bam.join(YARA_MAPPER.out.bai) )
+}</code></pre>
+      <p style="font-size:0.6em; color:var(--muted); margin-top:0.4em">
+        Note how <code>seq_type</code> (<code>dna</code> vs <code>rna</code>) selects a different reference FASTA, automatically, per sample.
+      </p>
+      <div class="callout warn" style="font-size:0.6em; margin-top:0.5em">
+        <strong>Why two tools, not one aligner?</strong> The classical HLA loci share deep sequence homology with each other and with non-expressed pseudogenes (HLA-H, -J, -K, …). A naive aligner spreads a read across several near-identical loci, so a per-locus best-hit call is ambiguous by construction. <code>YARA_MAPPER</code> first constrains reads to the curated HLA reference (an all-mappings, not best-hit, alignment), then <strong>OptiType</strong> resolves the ambiguity globally: it formulates allele selection as an <strong>integer linear program</strong> over all class-I loci at once, choosing the genotype that best explains the full read set rather than locus by locus. That global step is what gets you transplant-grade 4-digit calls.
+      </div>
+      <aside class="notes">
+        Time: ~1.5 min. Underline the per-sample reference selection — it lets one pipeline serve DNA and RNA samplesheets without branching the workflow definition itself. That is dataflow doing the work. If asked why Yara then OptiType: homology across HLA-A/-B/-C and pseudogenes makes per-locus best-hit mapping ambiguous; OptiType's ILP picks the genotype that jointly explains all reads.
+      </aside>
+    </section>
+
+    <!-- 25. Reading hlatyping.nf — versions topic -->
+    <section data-section="hlatyping worked example">
+      <h2>Provenance: <code>Channel.topic("versions")</code></h2>
+<pre><code class="language-groovy">// workflows/hlatyping.nf — verbatim
+def topic_versions = Channel.topic("versions")
+    .distinct()
+    .branch { entry -&gt;
+        versions_file: entry instanceof Path
+        versions_tuple: true
+    }
+
+def topic_versions_string = topic_versions.versions_tuple
+    .map { process, tool, version -&gt;
+        [ process[process.lastIndexOf(':')+1..-1], "  ${tool}: ${version}" ]
+    }
+    .groupTuple(by: 0)
+    .map { process, tool_versions -&gt;
+        tool_versions.unique().sort()
+        "${process}:\n${tool_versions.join('\n')}"
+    }</code></pre>
+      <ul style="font-size:0.65em; margin-top:0.5em">
+        <li><strong>Topic channels</strong> let any process emit into a named global stream (here, <code>"versions"</code>) without explicit wiring.</li>
+        <li>Combined with <code>groupTuple</code>, the pipeline ends with a <code>software_versions.yml</code> that lists every tool and version it ran.</li>
+        <li>That YAML is bundled into the MultiQC report. Reviewer-ready provenance, for free.</li>
+      </ul>
+      <aside class="notes">
+        Time: ~1.5 min. Emphasize that this provenance pattern is non-negotiable for clinical-translational work. A pipeline that cannot tell you what version of OptiType produced a call cannot be audited.
+      </aside>
+    </section>
+
+    <!-- 26. HLA-HD conditional -->
+    <section data-section="hlatyping worked example">
+      <h2>Conditional sub-DAGs: opting into HLA-HD</h2>
+<pre><code class="language-groovy">if ( "hlahd" in tools.tokenize(",") ) {
+    def hlahd_software_meta = file("$projectDir/assets/hlahd_software_meta.json",
+                                   checkIfExists: true)
+    def jsonSlurper = new groovy.json.JsonSlurper()
+    def hlahd_meta = jsonSlurper.parse(hlahd_software_meta)['hlahd']
+
+    def ch_hlahd_install = Channel.of([
+        'hlahd', hlahd_meta.version, hlahd_meta.software_md5,
+        file(params.hlahd_path, checkIfExists: true),
+        params.hlahd_update_reference_dict,
+    ])
+
+    HLAHD_INSTALL(ch_hlahd_install)
+    HLAHD(ch_all_fastq.combine(HLAHD_INSTALL.out.hlahd))
+    ch_versions = ch_versions.mix(HLAHD.out.versions)
+}</code></pre>
+      <ul style="font-size:0.65em; margin-top:0.5em">
+        <li>HLA-HD is license-gated, so it is opt-in via <code>--tools optitype,hlahd</code>.</li>
+        <li><code>combine</code> broadcasts the single install artifact to every sample (Cartesian product on a size-1 channel).</li>
+        <li><code>ch_versions.mix(...)</code> appends HLA-HD's versions to the same provenance stream as everything else.</li>
+      </ul>
+      <aside class="notes">
+        Time: ~1.5 min. The point of this slide: even an entire optional sub-DAG slots in cleanly without disturbing the rest of the pipeline. That modularity is what makes nf-core pipelines maintainable.
+      </aside>
+    </section>
+
+    <!-- 27. Live DSL2 editor -->
+    <section data-section="hlatyping worked example">
+      <h2>Try it: edit a process body</h2>
+      <p style="font-size:0.6em; color:var(--muted)">Change <code>${params.outdir}</code>, the OptiType flags, or <code>meta.seq_type</code> on the left. The right pane shows how Nextflow would render the script block at runtime. Switch samplesheet rows to watch the same process body resolve differently per sample.</p>
+      <div class="ss-tabs">
+        <button class="btn ss-tab active" data-sheet="dna">DNA · paired-end</button>
+        <button class="btn ss-tab" data-sheet="rna">RNA · single-end</button>
+      </div>
+      <div class="editor-widget">
+        <div>
+          <textarea id="editor-mount">process OPTITYPE {
+    tag "$meta.id"
+
+    publishDir "${params.outdir}/optitype", mode: 'copy'
+
+    input:
+    tuple val(meta), path(bam), path(bai)
+
+    output:
+    tuple val(meta), path("*_result.tsv"), emit: hla_type
+
+    script:
+    """
+    OptiTypePipeline.py -i ${bam} \\
+        --${meta.seq_type} -v -o ./ -p ${meta.id}
+    """
+}</textarea>
+        </div>
+        <div class="editor-preview" id="editor-preview">
+          <!-- Filled by app.js -->
+        </div>
+      </div>
+      <p style="font-size:0.55em; color:var(--muted); margin-top:0.3em">
+        Param substitution preview only. No execution — that is the runtime's job.
+      </p>
+      <aside class="notes">
+        Time: ~2 min. Have a couple of pre-canned edits ready in case the audience does not call any: change `--dna` to `--rna` via meta, change outdir prefix. The point is to demystify "what does Nextflow actually pass to the shell".
+      </aside>
+    </section>
+
+    <!-- 28. SECTION: Executors, containers, config -->
+    <section class="section-divider" data-section="Executors, containers, configuration">
+      <div class="section-num">Part 6 · 6 minutes</div>
+      <h1>Portability: one pipeline, every backend</h1>
+      <p class="section-blurb">Executors, containers, and the configuration layer that abstracts them.</p>
+      <aside class="notes">Time: ~10 sec.</aside>
+    </section>
+
+    <!-- 29. Executor profile tabs -->
+    <section data-section="Executors, containers, configuration">
+      <h2>Same pipeline, four backends. Only the config changes.</h2>
+      <div class="btn-row">
+        <button class="btn exec-tab active" data-exec="local">Local · Docker</button>
+        <button class="btn exec-tab" data-exec="singularity">HPC · Singularity</button>
+        <button class="btn exec-tab" data-exec="slurm">SLURM</button>
+        <button class="btn exec-tab" data-exec="awsbatch">AWS Batch</button>
+      </div>
+      <div class="executor-widget">
+        <pre><code class="language-groovy" id="exec-code">// Filled by app.js</code></pre>
+        <div class="exec-delta" id="exec-delta"><!-- Filled by app.js --></div>
+      </div>
+      <p style="font-size:0.55em; color:var(--muted); margin-top:0.4em">
+        The <code>process</code> definitions and <code>workflow</code> wiring never change. Only <code>nextflow.config</code> swaps. That is the entire portability story.
+      </p>
+      <aside class="notes">
+        Time: ~2 min. Click through all four tabs while saying out loud: "exact same hlatyping. Different config. Done." Mention that nf-core ships institutional configs for hundreds of HPC centers (see github.com/nf-core/configs).
+      </aside>
+    </section>
+
+    <!-- 30. Containers -->
+    <section data-section="Executors, containers, configuration">
+      <h2>Containers: one per process, version-pinned</h2>
+      <div class="two-col">
+        <div class="col" style="font-size:0.7em">
+          <ul>
+            <li><strong>Docker</strong> on workstations and managed cloud.</li>
+            <li><strong>Singularity / Apptainer</strong> on HPC (no root needed; works with shared filesystems).</li>
+            <li><strong>Conda</strong> as a last-resort fallback (slower, less reproducible).</li>
+            <li>Each process declares <em>its own</em> container. No global runtime to maintain.</li>
+          </ul>
+          <div class="callout nfcore" style="margin-top:0.6em">
+            <strong>nf-core convention:</strong> every module pins a Biocontainers image with a specific tool version and build hash. Two runs three months apart, same container hash, bit-identical output.
+          </div>
+        </div>
+        <div class="col">
+<pre><code class="language-groovy">process OPTITYPE {
+    container 'quay.io/biocontainers/optitype:1.3.5--hdfd78af_3'
+    // ... rest of the process
+}
+
+// Or, with separate Docker/Singularity URIs:
+process YARA_MAPPER {
+    container "${ workflow.containerEngine == 'singularity' &&
+        !task.ext.singularity_pull_docker_container ?
+        'https://depot.galaxyproject.org/singularity/yara:1.0.2--he1c1bb9_4' :
+        'quay.io/biocontainers/yara:1.0.2--he1c1bb9_4' }"
+}</code></pre>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~1.5 min. Container pinning is what closes the loop on reproducibility. Without it, the rest is theater. With it, you can write the version into the supplementary methods of a paper and someone can rerun your analysis in 2030.
+      </aside>
+    </section>
+
+    <!-- 31. nextflow.config -->
+    <section data-section="Executors, containers, configuration">
+      <h2><code>nextflow.config</code> and profiles</h2>
+      <div class="two-col">
+        <div class="col">
+<pre><code class="language-groovy">// conf/base.config (real hlatyping pattern)
+process {
+    cpus   = { 1   * task.attempt }
+    memory = { 6.GB * task.attempt }
+    time   = { 4.h * task.attempt }
+
+    errorStrategy = { task.exitStatus in [137,143] ? 'retry' : 'finish' }
+    maxRetries    = 2
+
+    withLabel: process_medium {
+        cpus   = { 6    * task.attempt }
+        memory = { 36.GB * task.attempt }
+    }
+    withName: OPTITYPE {
+        memory = { 16.GB * task.attempt }
+    }
+}</code></pre>
+        </div>
+        <div class="col" style="font-size:0.68em">
+          <h3>Profiles</h3>
+          <ul>
+            <li><code>-profile docker</code> — local Docker</li>
+            <li><code>-profile singularity</code> — HPC</li>
+            <li><code>-profile conda</code> — Conda fallback</li>
+            <li><code>-profile test</code> — tiny test data + Docker</li>
+            <li><code>-profile test_full</code> — full-size CI</li>
+          </ul>
+          <h3 style="margin-top:0.6em">hlatyping ships eight test profiles</h3>
+          <p style="color:var(--muted)">
+            <code>test</code>, <code>test_fastq</code>, <code>test_fastq_cat</code>, <code>test_rna</code>, <code>test_dna_rna</code>, <code>test_hlahd</code>, <code>test_optitype_hlahd</code>, <code>test_full</code> — each exercising a different input pattern.
+          </p>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~2 min. The resource scopes and selectors (`withLabel`, `withName`) are how you tune one process at a time without rewriting the workflow. The retry-on-OOM (exit 137) is a small but powerful default that prevents cluster transients from killing 12-hour runs.
+      </aside>
+    </section>
+
+    <!-- 32. SECTION: nf-core + observability -->
+    <section class="section-divider" data-section="nf-core ecosystem and observability">
+      <div class="section-num">Part 7 · 4 minutes</div>
+      <h1>nf-core, resume, and the reports that justify a run</h1>
+      <p class="section-blurb">The community standard, the runtime trick that pays for itself in an afternoon, and the audit trail.</p>
+      <aside class="notes">Time: ~10 sec.</aside>
+    </section>
+
+    <!-- 33. modules/nf-core vs modules/local -->
+    <section data-section="nf-core ecosystem and observability">
+      <h2>nf-core: shared modules, shared standards</h2>
+      <div class="two-col">
+        <div class="col" style="font-size:0.7em">
+          <h3>What nf-core gives you</h3>
+          <ul>
+            <li>~100 curated end-to-end pipelines (rnaseq, sarek, ampliseq, hlatyping, …).</li>
+            <li>~1500 versioned, tested process modules in <code>modules/nf-core/</code>.</li>
+            <li>A standard project template (the one hlatyping uses, v3.5.1).</li>
+            <li>CI (<code>nf-test</code>, GitHub Actions, full-size AWS runs).</li>
+            <li>The launch UI on Seqera Platform, driven by <code>nextflow_schema.json</code>.</li>
+          </ul>
+          <div class="callout nfcore" style="margin-top:0.5em">
+            <strong>Read once, run anywhere.</strong> Every nf-core pipeline you encounter has the same layout, the same flags, the same provenance pattern.
+          </div>
+        </div>
+        <div class="col" style="font-size:0.7em">
+          <h3>The local-vs-nf-core split, in hlatyping</h3>
+<pre style="font-size:0.85em"><code>modules/
+├── local/
+│   ├── check_paired/          # is this BAM paired-end?
+│   ├── hlahd/install/         # license-gated install
+│   └── hlahd/genotype/        # license-gated typing
+└── nf-core/
+    ├── cat/fastq/
+    ├── fastqc/
+    ├── gunzip/
+    ├── multiqc/
+    ├── optitype/
+    ├── samtools/collatefastq/
+    ├── samtools/view/
+    ├── yara/index/
+    └── yara/mapper/</code></pre>
+          <p style="color:var(--muted); margin-top:0.4em">
+            If a future pipeline needs Yara, it imports the same module. No copy-paste drift.
+          </p>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~2 min. Drive home that nf-core is not just code reuse — it is a social contract about what "production" means in bioinformatics. Mention `nf-core create` for spinning up your own pipeline that ships with all of this.
+      </aside>
+    </section>
+
+    <!-- 34. nf-core/tools, nf-test, schema -->
+    <section data-section="nf-core ecosystem and observability">
+      <h2>Tooling: <code>nf-core/tools</code>, <code>nf-test</code>, and the schema-driven UI</h2>
+      <div class="three-col">
+        <div class="col">
+          <h3>nf-core/tools</h3>
+          <ul style="font-size:0.65em">
+            <li><code>nf-core create</code></li>
+            <li><code>nf-core lint</code></li>
+            <li><code>nf-core sync</code></li>
+            <li><code>nf-core modules install</code></li>
+          </ul>
+          <p style="font-size:0.6em; color:var(--muted)">CLI for spinning up, updating, and lint-checking nf-core pipelines.</p>
+        </div>
+        <div class="col">
+          <h3>nf-test</h3>
+          <ul style="font-size:0.65em">
+            <li>Unit tests for processes</li>
+            <li>Snapshot tests for outputs</li>
+            <li>CI on every PR</li>
+          </ul>
+          <p style="font-size:0.6em; color:var(--muted)">hlatyping ships an <code>nf-test.config</code> and a <code>tests/</code> tree. Changes that break a process do not merge.</p>
+        </div>
+        <div class="col">
+          <h3>nextflow_schema.json</h3>
+          <ul style="font-size:0.65em">
+            <li>Machine-readable parameter spec</li>
+            <li>Drives CLI <code>--help</code> output</li>
+            <li>Drives the Seqera launch form</li>
+          </ul>
+          <p style="font-size:0.6em; color:var(--muted)">One schema, three surfaces (CLI, docs, web UI). No drift between them.</p>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~1 min. Skim this slide — it is there for completeness. The point is: nf-core is not just modules, it is a tooling ecosystem that handles the not-pipeline-code parts of being a pipeline maintainer.
+      </aside>
+    </section>
+
+    <!-- 35. -resume mechanics + simulator -->
+    <section data-section="nf-core ecosystem and observability">
+      <h2><code>-resume</code>: the single most loved Nextflow feature</h2>
+      <p style="font-size:0.65em; color:var(--muted); margin-bottom:0.4em">
+        Nextflow hashes <strong>(inputs + script body + container digest + directives)</strong> per task. On <code>-resume</code>, every task with a matching hash is fetched from <code>work/</code> instead of rerun.
+      </p>
+      <div class="resume-widget">
+        <div class="resume-col">
+          <h3>Run 1 · cold</h3>
+          <div id="resume-run1"><!-- filled by app.js --></div>
+        </div>
+        <div class="resume-col">
+          <h3>Run 2 · <code>--tools optitype,hlahd -resume</code></h3>
+          <div id="resume-run2"><!-- filled by app.js --></div>
+        </div>
+      </div>
+      <p style="font-size:0.55em; color:var(--muted); margin-top:0.4em">
+        Only the HLA-HD branch is new in run 2. FastQC, Yara, OptiType are cache-hit; MultiQC re-runs because its input set has changed.
+      </p>
+      <aside class="notes">
+        Time: ~2 min. Tell the story of `-resume` saving you a day of recompute. Even one well-placed `-resume` after a downstream parameter tweak pays for the whole switch to Nextflow.
+      </aside>
+    </section>
+
+    <!-- 36. Reports + Seqera -->
+    <section data-section="nf-core ecosystem and observability">
+      <h2>Observability you get for free</h2>
+      <div class="two-col">
+        <div class="col" style="font-size:0.7em">
+          <h3>Built-in HTML reports</h3>
+          <ul>
+            <li><code>pipeline_info/execution_report.html</code> — CPU, memory, wall-clock per task.</li>
+            <li><code>pipeline_info/execution_timeline.html</code> — Gantt chart.</li>
+            <li><code>pipeline_info/pipeline_dag.svg</code> — the rendered DAG.</li>
+            <li><code>pipeline_info/software_versions.yml</code> — provenance, every tool, every version.</li>
+            <li><code>multiqc/multiqc_report.html</code> — domain-level QC + typing summary.</li>
+          </ul>
+        </div>
+        <div class="col" style="font-size:0.7em">
+          <h3>Seqera Platform (formerly Tower)</h3>
+          <ul>
+            <li>Web UI to launch, monitor, and audit Nextflow runs.</li>
+            <li>Real-time per-task metrics during a 200-sample run.</li>
+            <li>Launch-form auto-generated from <code>nextflow_schema.json</code>.</li>
+            <li>Free tier for personal / academic use.</li>
+          </ul>
+          <div class="callout" style="margin-top:0.5em">
+            Open <code>pipeline_dag.svg</code> after your first real run. It is the fastest way to internalize how dataflow composes processes.
+          </div>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~1 min. These reports are not optional add-ons. They are produced on every run. Your supplementary methods section is half-written for you.
+      </aside>
+    </section>
+
+    <!-- 36b. Observability, visualized -->
+    <section data-section="nf-core ecosystem and observability">
+      <h2>The same reports, visualized</h2>
+      <p style="font-size:0.62em; color:var(--muted); margin-bottom:0.5em">
+        Left: <code>execution_timeline.html</code> for one sample — hover any task for its resource profile. Right: a live Seqera run, the same data streamed during execution.
+      </p>
+      <div class="two-col" style="grid-template-columns: 1.45fr 1fr;">
+        <div class="col">
+          <div class="gantt-widget">
+            <div class="gantt-chart">
+              <svg id="gantt-svg" role="img" aria-label="execution timeline Gantt chart"></svg>
+            </div>
+            <div class="gantt-info" id="gantt-info"><!-- Filled by app.js --></div>
+          </div>
+        </div>
+        <div class="col">
+          <div class="seqera-dash" id="seqera-mount"><!-- Filled by app.js --></div>
+          <p style="font-size:0.52em; color:var(--muted); margin-top:0.5em">
+            OPTITYPE is the resource hotspot: modest CPU, but the ILP solve drives peak RSS. That single fact is why the SLURM profile gave it a <code>withName: OPTITYPE</code> memory override.
+          </p>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~1.5 min. Hover OPTITYPE in the Gantt to make the memory point concretely, then tie it back to the executor-config slide's per-process override. The Seqera dials are a mockup of what a 200-sample production run looks like live — emphasize cache hits paying off across a cohort.
+      </aside>
+    </section>
+
+    <!-- 37. Why this matters: HLA / transplant -->
+    <section data-section="Why this matters">
+      <h2>Why this matters: HLA, transplant, and immunogenomics</h2>
+      <ul style="font-size:0.75em">
+        <li><strong>Transplant matching.</strong> 4-digit class I typing for HSCT and solid-organ donor selection. A version-pinned OptiType means the typing call from your January cohort and your June cohort are directly comparable.</li>
+        <li><strong>Neoantigen prediction.</strong> NetMHCpan needs HLA alleles. hlatyping is upstream of every immuno-oncology pipeline that uses MHC class I binding affinity.</li>
+        <li><strong>Pharmacogenomic screening.</strong> HLA-B*57:01 before abacavir; HLA-B*15:02 before carbamazepine. The same FASTQ-to-allele pipeline serves both.</li>
+        <li><strong>Population HLA frequency studies.</strong> Run a 10 000-sample cohort with <code>-profile awsbatch</code>; the provenance YAML lands next to every result for downstream meta-analysis.</li>
+        <li><strong>HLA-disease GWAS imputation validation.</strong> Sequence-derived typing as ground truth for SNP-based HLA imputation methods.</li>
+      </ul>
+      <aside class="notes">
+        Time: ~1.5 min. This is your home turf. Make the connection between dataflow design and the immunogenetics use cases you actually work on. Mention Dr. Gragert's group's work if relevant.
+      </aside>
+    </section>
+
+    <!-- 38. When NOT to use Nextflow -->
+    <section data-section="Why this matters">
+      <h2>When <em>not</em> to use Nextflow</h2>
+      <ul style="font-size:0.75em">
+        <li><strong>One-off scripts.</strong> Parse a CSV, plot a figure. Bash or a notebook is faster.</li>
+        <li><strong>Heavily interactive analyses.</strong> Exploratory R/Python work, GUI-driven plotting. Nextflow's strength is batch reproducibility, not iteration speed.</li>
+        <li><strong>Single-process tools.</strong> If your "pipeline" is one Python script, wrapping it in Nextflow buys you containers and resume — useful, but ask whether <code>nextflow run script.py</code> is overkill.</li>
+        <li><strong>No portability need.</strong> If the work will only ever run on your laptop, the abstraction tax is not worth it.</li>
+      </ul>
+      <div class="callout warn" style="margin-top:0.5em">
+        <strong>The honest pitch.</strong> Nextflow shines when you have multiple samples, multiple tools, and a future audit. It is a load-bearing investment, not a script wrapper.
+      </div>
+      <aside class="notes">
+        Time: ~1 min. Be honest about scope. A tool is good when it solves real problems and bad when it manufactures them.
+      </aside>
+    </section>
+
+    <!-- 39. Resources & citations -->
+    <section data-section="Closing">
+      <h2>Resources and citations</h2>
+      <div class="two-col">
+        <div class="col" style="font-size:0.65em">
+          <h3>Start here</h3>
+          <ul>
+            <li><a href="https://nextflow.io">nextflow.io</a> — runtime and docs</li>
+            <li><a href="https://nf-co.re">nf-co.re</a> — community pipelines</li>
+            <li><a href="https://nf-co.re/hlatyping">nf-co.re/hlatyping</a> — the worked example</li>
+            <li><a href="https://training.nextflow.io">training.nextflow.io</a> — official tutorials</li>
+            <li><a href="https://nfcore.slack.com">nfcore.slack.com</a> — community help</li>
+          </ul>
+        </div>
+        <div class="col" style="font-size:0.65em">
+          <h3>Papers</h3>
+          <ul>
+            <li>Di Tommaso et al. <em>Nextflow enables reproducible computational workflows.</em> Nat Biotechnol 35, 316–319 (2017).</li>
+            <li>Ewels et al. <em>The nf-core framework for community-curated bioinformatics pipelines.</em> Nat Biotechnol 38, 276–278 (2020).</li>
+            <li>Szolek et al. <em>OptiType: precision HLA typing from next-generation sequencing data.</em> Bioinformatics 30, 3310–3316 (2014).</li>
+            <li>Kawaguchi et al. <em>HLA-HD: an accurate HLA typing algorithm for next-generation sequencing data.</em> Hum Mutat 38, 788–797 (2017).</li>
+          </ul>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~30 sec. Leave the slide up during Q&amp;A so people can photograph it.
+      </aside>
+    </section>
+
+    <!-- 40. Q&A -->
+    <section class="title-slide" data-section="Closing">
+      <div class="eyebrow">Thank you</div>
+      <h1>Questions?</h1>
+      <p class="subtitle">Slides, prompt, and the worked-example references are linked from the deck.</p>
+      <p class="lecturer">
+        <strong>MD Shakhaowat Hossain</strong><br>
+        <span>PhD Candidate, Biomedical Sciences</span><br>
+        <span>Tulane University School of Medicine</span><br>
+        <span>HLA immunogenetics · transplant informatics</span>
+      </p>
+      <aside class="notes">
+        Time: ~4 min. Stay on this slide. Re-state your contact info verbally for anyone who missed slide 1.
+      </aside>
+    </section>
+
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/groovy/groovy.min.js"></script>
+
+<script src="app.js"></script>
+</body>
+</html>

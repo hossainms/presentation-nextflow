@@ -7,6 +7,13 @@ manuscript_*.md
 manuscript_*.docx
 *Guidelines*.pdf
 
+# Build brief — internal, not for public portfolio
+prompt.md
+
+# Copyrighted source material — cited in the deck, never redistributed
+nextflow_aricle.pdf
+*.pdf
+
 # OS / editor
 .DS_Store
 .vscode/

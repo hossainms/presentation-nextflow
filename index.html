@@ -30,12 +30,28 @@
       <p class="lecturer">
         <strong>MD Shakhaowat Hossain</strong><br>
         <span>PhD Candidate, Biomedical Sciences</span><br>
+        <span>Center for Biomedical Informatics and Genomics</span><br>
         <span>Tulane University School of Medicine</span><br>
         <span>HLA immunogenetics · transplant informatics</span>
       </p>
       <p class="kb-hint">Press <kbd>S</kbd> for speaker view · <kbd>Space</kbd> to advance · <kbd>Esc</kbd> for overview</p>
       <aside class="notes">
         Time: ~1 min. Frame the talk: we are not going to read documentation. We will read a real, production HLA-typing pipeline that I run, and use it to teach Nextflow. By the end of the hour you should be able to open workflows/hlatyping.nf and understand every line.
+      </aside>
+    </section>
+
+    <!-- 1b. Scope and attribution -->
+    <section data-section="Opening">
+      <h2>Scope and attribution</h2>
+      <div class="callout">
+        <p>This lecture is an <strong>educational walkthrough</strong>. Its goal is to build a clear conceptual understanding of how <strong>Nextflow</strong>, a widely adopted workflow management system, behaves in a real project setting rather than a toy example.</p>
+        <p style="margin-top:0.6em">The worked example, <code>nf-core/hlatyping</code>, is an <strong>open-source, publicly available community pipeline</strong>. I use it here purely as a teaching artifact because it is production-grade and freely inspectable.</p>
+      </div>
+      <div class="callout nfcore" style="margin-top:0.6em; font-size:0.85em">
+        <strong>I am not a developer or maintainer of the hlatyping pipeline.</strong> All credit for its design and implementation belongs to the nf-core community and its contributors. Source: <code>github.com/nf-core/hlatyping</code> · <code>nf-co.re/hlatyping</code>.
+      </div>
+      <aside class="notes">
+        Time: ~30 sec. State the position plainly: this is a conceptual teaching talk on Nextflow, not a claim of authorship over hlatyping. The pipeline is open source; I am borrowing it as a realistic worked example. Point the room to the public URLs so they can clone and follow along.
       </aside>
     </section>
 
@@ -117,7 +133,82 @@ done
         </div>
       </div>
       <aside class="notes">
-        Time: ~1.5 min. Note that bash is not bad. It is great for prototyping. But when you have 200 samples and one cluster outage, the cost of recovering is the cost of writing the pipeline again.
+        Time: ~2 min. This slide highlights the transition from simple scripting to advanced workflow management. While bash is a powerful tool for chaining programs together, it eventually hits a "hard ceiling" for complex scientific pipelines.
+
+        You can see on the right side of the slide the kind of manual, error-prone bash scripting required to process samples one at a time. It has some limitations like the lack of automatic parallelism across multiple samples, the difficulty of resuming computation from a failed step, and the lack of built-in reproducibility.
+
+        Bash also doesn't handle scaling up very well automatically, meaning it can't easily run many samples at the same time or move smoothly to a more powerful computer. That's where a tool like Nextflow comes in. It acts like a smart manager that automatically handles the parallelism, makes it easy to resume work from where it failed, and keeps everything consistent no matter where you run it.
+
+        Let's look at that example on the right to understand exactly what's happening. First, you see the line starting with for s in $(cat samples.txt), which is a loop that goes through a list of sample names one by one. Inside the loop, the first command is fastqc, which checks the quality of the raw sequencing files. Next, the bwa mem command aligns those reads to a reference genome, and that output is immediately piped into samtools sort to organize the data. Finally, the samtools index command creates an index file for quick retrieval.
+      </aside>
+    </section>
+
+    <!-- 4b. The same task, as Nextflow -->
+    <section data-section="Why workflow managers">
+      <h2>The same task, as a Nextflow pipeline</h2>
+      <div class="two-col" style="grid-template-columns: 1.55fr 1fr;">
+        <div class="col">
+<pre><code class="language-groovy" data-noescape>// Identical work — main.nf. Run with: nextflow run main.nf -resume
+process FASTQC {
+    tag "$id"
+    publishDir 'qc', mode: 'copy'
+
+    input:
+    tuple val(id), path(reads)
+
+    output:
+    path "*_fastqc.zip"
+
+    script:
+    "fastqc ${reads} -o ."
+}
+
+process BWA_MEM {
+    tag "$id"
+    cpus 8
+    publishDir 'bam', mode: 'copy'
+
+    input:
+    tuple val(id), path(reads)
+    path ref
+
+    output:
+    tuple val(id), path("${id}.bam"), path("${id}.bam.bai")
+
+    script:
+    """
+    bwa mem -t ${task.cpus} ${ref} ${reads} \\
+      | samtools sort -@ ${task.cpus} -o ${id}.bam -
+    samtools index ${id}.bam
+    """
+}
+
+workflow {
+    reads_ch = Channel.fromFilePairs('reads/*_{1,2}.fq.gz')
+
+    FASTQC(reads_ch)
+    BWA_MEM(reads_ch, file('ref.fa'))
+}</code></pre>
+        </div>
+        <div class="col" style="font-size:0.66em">
+          <h3>What the for-loop could not give you</h3>
+          <ul>
+            <li><strong>Parallelism is free.</strong> <code>fromFilePairs</code> fans out; every sample runs FASTQC and BWA_MEM concurrently. No <code>for</code> loop, no manual job bookkeeping.</li>
+            <li><strong>Resume from the failure.</strong> When sample 47 dies on an I/O blip, rerun with <code>-resume</code>: the 46 finished samples are cache hits, only 47 re-executes.</li>
+            <li><strong>Portable, unchanged.</strong> <code>-profile docker | singularity | awsbatch</code> runs this same code on a laptop, an HPC queue, or the cloud.</li>
+            <li><strong>Pinned and provenant.</strong> One <code>container</code> directive per process locks the tool version; every run emits <code>execution_report.html</code> and <code>software_versions.yml</code>.</li>
+          </ul>
+          <div class="callout nfcore" style="margin-top:0.4em; font-size:0.92em">
+            Same three commands. The difference is everything <em>around</em> them.
+          </div>
+        </div>
+      </div>
+      <aside class="notes">
+        Time: ~1.5 min. Let's take a look at the code on the left side of the screen. This is a Nextflow script that defines how we process data in our pipeline.
+
+        You can see two distinct processes here: one for running FastQC, and another for BWA-MEM. For the FastQC process, we've set tags for easy tracking, specified an output directory to store the results, and defined the input and output files along with the actual script command.
+
+        Now, if we shift our focus to the right side, you'll see a summary of why this structure is so powerful. It highlights that parallelism is free because processes run concurrently, that you can resume from failures, that the code is portable across different environments, and that software versions are pinned down for reproducibility.
       </aside>
     </section>
 
@@ -185,7 +276,15 @@ done
         </div>
       </div>
       <aside class="notes">
-        Time: ~2 min. Hammer the point: parallelism over samples is free. You never write a for-loop. The runtime fans out automatically.
+        Time: ~2 min. When we talk about dataflow programming, we're stepping away from telling the computer the exact step-by-step order of operations. Instead, you define what depends on what, and Nextflow infers the execution graph from that automatically.
+
+        Within Nextflow, we have three main components: a Process, which is a single unit of work, like a script along with its inputs and outputs; a Channel, which acts as a typed, asynchronous queue of values; and the Workflow, which handles the actual wiring between those processes.
+
+        On the right, you'll see a code block that demonstrates this. We start by creating a channel to grab our paired sequencing files. Those are then passed into a FASTQC process, running in parallel on every pair. After, they go into the alignment step, and finally, all the results are gathered for a summary report.
+
+        The overarching benefit is that the dependency graph is implicit, meaning you don't need to write a scheduler. Nextflow manages parallelism and resource allocation seamlessly, making your scientific pipelines both highly scalable and reproducible.
+
+        In the code block shown, the specific example of a channel is the line that reads reads_ch = Channel.fromFilePairs('data/*_{1,2}.fq.gz'), which handles organizing your paired sequencing data. The specific examples of processes are the lines calling FASTQC(reads_ch), which checks the quality, and BWA_MEM(reads_ch), which aligns the reads. Finally, the entire block wrapped in the workflow definition, which includes these processes and channels, represents the workflow itself, connecting everything together.
       </aside>
     </section>
 
@@ -584,12 +683,12 @@ YARA_MAPPER(
         </div>
         <div class="col">
           <h3>Samplesheet (the only input contract)</h3>
-<pre><code class="language-csv">sample,fastq_1,fastq_2,seq_type
-CONTROL_REP1,reads/c1_R1.fq.gz,reads/c1_R2.fq.gz,dna
-PATIENT_07,reads/p7_R1.fq.gz,reads/p7_R2.fq.gz,rna
-DONOR_A,reads/dA.bam,,dna</code></pre>
+<pre><code class="language-csv">sample,fastq_1,fastq_2,bam,seq_type
+CONTROL_REP1,reads/c1_R1.fq.gz,reads/c1_R2.fq.gz,,dna
+PATIENT_07,reads/p7_R1.fq.gz,reads/p7_R2.fq.gz,,rna
+DONOR_A,,,reads/dA.bam,dna</code></pre>
           <p style="font-size:0.65em; color:var(--muted); margin-top:0.5em">
-            Column rules: paired-end gets both <code>fastq_1</code> and <code>fastq_2</code>; BAM input puts the path in <code>fastq_1</code> with a <code>bam</code> column. <code>seq_type</code> drives reference selection.
+            Column rules: paired-end fills <code>fastq_1</code> and <code>fastq_2</code>; BAM input goes in its own <code>bam</code> column with the FASTQ columns left empty. Only <code>sample</code> and <code>seq_type</code> are required; <code>seq_type</code> drives reference selection.
           </p>
         </div>
       </div>
@@ -1072,7 +1171,7 @@ process {
       <ul style="font-size:0.75em">
         <li><strong>One-off scripts.</strong> Parse a CSV, plot a figure. Bash or a notebook is faster.</li>
         <li><strong>Heavily interactive analyses.</strong> Exploratory R/Python work, GUI-driven plotting. Nextflow's strength is batch reproducibility, not iteration speed.</li>
-        <li><strong>Single-process tools.</strong> If your "pipeline" is one Python script, wrapping it in Nextflow buys you containers and resume — useful, but ask whether <code>nextflow run script.py</code> is overkill.</li>
+        <li><strong>Single-process tools.</strong> If your "pipeline" is one Python script, wrapping it in a single-process Nextflow workflow buys you containers and resume — useful, but ask whether the workflow scaffolding is overkill for one command.</li>
         <li><strong>No portability need.</strong> If the work will only ever run on your laptop, the abstraction tax is not worth it.</li>
       </ul>
       <div class="callout warn" style="margin-top:0.5em">
@@ -1116,10 +1215,11 @@ process {
     <section class="title-slide" data-section="Closing">
       <div class="eyebrow">Thank you</div>
       <h1>Questions?</h1>
-      <p class="subtitle">Slides, prompt, and the worked-example references are linked from the deck.</p>
+      <p class="subtitle">Slides and the worked-example references are linked from the deck.</p>
       <p class="lecturer">
         <strong>MD Shakhaowat Hossain</strong><br>
         <span>PhD Candidate, Biomedical Sciences</span><br>
+        <span>Center for Biomedical Informatics and Genomics</span><br>
         <span>Tulane University School of Medicine</span><br>
         <span>HLA immunogenetics · transplant informatics</span>
       </p>

@@ -64,3 +64,7 @@ Controls: `Space` to advance, arrow keys to navigate, `S` for speaker view (with
 PhD Candidate, Biomedical Sciences
 Center for Biomedical Informatics and Genomics
 Tulane University School of Medicine
+
+- Email: <mhossain1@tulane.edu>
+- Website: https://shakhaowat.com
+- ORCID: [0000-0003-3366-8720](https://orcid.org/0000-0003-3366-8720)
